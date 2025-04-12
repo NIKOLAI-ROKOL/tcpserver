@@ -164,7 +164,7 @@ int main(int argc, char* argv[])
 						}
 
 						gMaxClientReqInt = (unsigned int)atoi(pval);
-						if ((gMaxClientReqInt < 1) || (gMaxClientReqInt > 500)) {
+						if ((gMaxClientReqInt < 1) || (gMaxClientReqInt > 10000)) {
 							printf("Maximum number of client's requests per interval is OOR (%u)\n", gMaxClientReqInt);
 							config_ussue = true;
 							break;
@@ -549,10 +549,10 @@ static void HelpInfoPrint()
 	printf("    CFG     - TCP server configuration file\n");
 	printf("Example: ./udp_server server.cfg\n\n");
 	printf("Server's configuratino file structure\nAll parameters are optional.\n");
-	printf("%s: <Address>   - Server's IP address or FQDN (default: %s)\n", server_ip_addr_tag, SERVER_DEF_ACCESS_ADDR);
-	printf("%s: <1...65535>    - Server's IP port (default: %u)\n", server_ip_port_tag, SERVER_DEF_ACCESS_PORT);
-	printf("%s: <1...100>     - Maximum number of simultaneously processed clients (Default: %u)\n", max_simult_clients_tag, MAX_DEF_SIMILT_CLIENTS);
-	printf("%s: <1...500>  - Maximum number of processed client's requests per second (Default: %u)\n", max_client_req_int_tag, MAX_DEF_CLIENT_REQ_PER_INT);
+	printf("%s: <Address>    - Server's IP address or FQDN (default: %s)\n", server_ip_addr_tag, SERVER_DEF_ACCESS_ADDR);
+	printf("%s: <1...65535>     - Server's IP port (default: %u)\n", server_ip_port_tag, SERVER_DEF_ACCESS_PORT);
+	printf("%s: <1...100>      - Maximum number of simultaneously processed clients (Default: %u)\n", max_simult_clients_tag, MAX_DEF_SIMILT_CLIENTS);
+	printf("%s: <1...10000> - Maximum number of processed client's requests per second (Default: %u)\n", max_client_req_int_tag, MAX_DEF_CLIENT_REQ_PER_INT);
 }
 
 static bool handle_clients_message(struct channel_info* pChan)

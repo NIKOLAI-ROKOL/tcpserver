@@ -21,12 +21,11 @@ static unsigned long long int TestDuation = 0;
 static char client_info_delimer[] = "-------------------------------------------";
 static char def_server_addr[] = SERVER_DEF_ACCESS_ADDR;
 
-static char test_data[] = 
-	"0123456789qwertyuiopasdfghjklzxcvbnm0123456789qwertyuiopasdfghjklzxcvbnm"
-	"0123456789qwertyuiopasdfghjklzxcvbnm0123456789qwertyuiopasdfghjklzxcvbnm"
-	"0123456789qwertyuiopasdfghjklzxcvbnm0123456789qwertyuiopasdfghjklzxcvbnm"
-	"0123456789qwertyuiopasdfghjklzxcvbnm0123456789qwertyuiopasdfghjklzxcvbnm";
-uint32_t test_data_len = sizeof(test_data)/sizeof(char);
+static char encode_chars[] = "0123456789abcdef";
+uint32_t encode_chars_len = sizeof(encode_chars)/sizeof(char);
+
+static uint32_t test_data_len = 4300;
+static uint8_t test_data[MAX_SERVER_MSG_SIZE + 1];
 
 static void client_usage_show(char* parg, int args)
 {
@@ -94,6 +93,15 @@ int main(int argc, char *argv[])
 	printf("Clients running:        %u\n", TestInstances);
 	printf("%s\n", client_info_delimer);
 	
+	// Fillout test body
+	for (i=0;i < test_data_len;i++) {
+		uint8_t index = (uint8_t)rand() % (encode_chars_len - 1);
+		test_data[i] = (uint8_t)encode_chars[index];
+	}
+	test_data[test_data_len] = 0;
+
+//	printf("Test body: (%u) {%s}\n", test_data_len, (char*)test_data);
+
     for (i=0;i < TestInstances;i++) {
 		CLIENT_INFO* pClient = &TestTaskList[i];
         pClient->TaskId = i + 1;
@@ -305,7 +313,9 @@ void* THRSimClient(void *arg)
 							is_connect_close = true;
 							break;
 						} else if (rc == 0) {
-							printf("Session is closed %u (%s)\n", errno, strerror(errno));
+							if ((errno != ECONNRESET) && (errno != 0)) {
+								printf("Client: %u, Session is closed %u (%s)\n", pClientCtx->TaskId, errno, strerror(errno));
+							}
 							is_connect_close = true;
 							break;
 						}

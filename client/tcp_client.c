@@ -10,6 +10,7 @@ Revision history:
 
 static CLIENT_INFO TestTaskList[MAX_SIMULT_TEST_THR + 1];
 
+static bool handle_server_message(void* data, uint8_t* p_req, uint32_t data_len);
 static void SessionClose(CLIENT_INFO* pClientCtx);
 
 static uint16_t 		TcpServerPort = SERVER_DEF_ACCESS_PORT;
@@ -25,7 +26,7 @@ static char encode_chars[] = "0123456789abcdef";
 uint32_t encode_chars_len = sizeof(encode_chars)/sizeof(char);
 
 static uint32_t test_data_len = 4300;
-static uint8_t test_data[MAX_SERVER_MSG_SIZE + 1];
+static uint8_t test_data[MAX_CLIENT_MSG_SIZE + 1];
 
 static void client_usage_show(char* parg, int args)
 {
@@ -138,9 +139,9 @@ int main(int argc, char *argv[])
     return 0;
 }
 
-static bool handle_server_message(CLIENT_INFO* pClientCtx)
+bool handle_server_message(void* data, uint8_t* p_resp_msg, uint32_t data_len)
 {
-	uint8_t* p_resp_msg = pClientCtx->client_msg_buf;
+	CLIENT_INFO* pClientCtx = (CLIENT_INFO*)data;
 	uint8_t msg_tag = *p_resp_msg++;
 	
 	if (msg_tag == CLIENT_API_MSG_RESP) {
@@ -154,46 +155,6 @@ static bool handle_server_message(CLIENT_INFO* pClientCtx)
 	delay_ms(InterReqDelay);
 	pClientCtx->RespMsgDone = true;
 	return true;
-}
-
-static bool HandleServerPacketFormer(CLIENT_INFO* pClientCtx, uint8_t* pBody, uint32_t len)
-{
-	bool status = true;
-	do {
-		if (!pClientCtx->is_msg_header_read) {
-			if (len < 2) {
-				status = false;
-				break;
-			}
-
-			pBody = Uint16Unpack(pBody, &pClientCtx->body_size);			
-			if (pClientCtx->body_size > MAX_SERVER_MSG_SIZE) {
-				status = false;
-				break;				
-			}
-
-			pClientCtx->is_msg_header_read = true;
-			len -= 2;
-		}
-
-		uint32_t ds = pClientCtx->body_size - pClientCtx->body_offset;
-		if (len < ds) {
-			memcpy(&pClientCtx->client_msg_buf[pClientCtx->body_offset], pBody,  len);
-			pClientCtx->body_offset += len;
-			break;
-		}
-
-		memcpy(&pClientCtx->client_msg_buf[pClientCtx->body_offset], pBody,  ds);
-		if (!handle_server_message(pClientCtx)) {
-			status = false;
-			break;
-		}
-
-		len -= ds;
-		pClientCtx->body_offset = 0;
-		pClientCtx->is_msg_header_read = false;
-	} while (len > 0);
-	return status;
 }
 
 void* THRSimClient(void *arg)
@@ -211,7 +172,7 @@ void* THRSimClient(void *arg)
     int             maxfdp = 0;
     int		        Select_result;
 	char			RxBuf[MAX_SERV_RX_PACKET + 1];
-    char			SentBuf[MAX_SERVER_MSG_SIZE + 4];
+    char			SentBuf[MAX_CLIENT_MSG_SIZE + 4];
 	
     pClientCtx = (CLIENT_INFO*)arg;
 	pClientCtx->CompletedRequests = 0;
@@ -220,12 +181,13 @@ void* THRSimClient(void *arg)
 	
 	printf("Started client %d\n", pClientCtx->TaskId);
 
- 	pClientCtx->pResp = (uint8_t*)malloc((MAX_SERVER_MSG_SIZE + 4)*sizeof(uint8_t));
+ 	pClientCtx->pResp = (uint8_t*)malloc((MAX_CLIENT_MSG_SIZE + 4)*sizeof(uint8_t));
 	if (!pClientCtx->pResp) {
         printf("mem alloc Thr: %d\n", pClientCtx->TaskId);
         pthread_exit((void *)0);
 	}
 
+	tcp_former_init(&pClientCtx->former, pClientCtx, handle_server_message);
 	clock_gettime(CLOCK_REALTIME, &spec);
 	StartTime = (unsigned long long int)spec.tv_sec * 1000000;
 	StartTime += (unsigned long long int)(spec.tv_nsec / 1000);
@@ -320,7 +282,7 @@ void* THRSimClient(void *arg)
 							break;
 						}
 
-						if (!HandleServerPacketFormer(pClientCtx, RxBuf, rc)) {
+						if (!tcp_former_process_data(&pClientCtx->former, RxBuf, rc)) {
 							is_connect_close = true;
 							break;					
 						}

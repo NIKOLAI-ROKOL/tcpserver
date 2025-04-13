@@ -8,9 +8,9 @@ Revision history:
 */
 
 #include "common_lib.h"
+#include "tcp_former.h"
 
 #define MAX_SIMULT_TEST_THR		500
-#define MAX_SERVER_MSG_SIZE		8192
 #define MAX_SERV_RX_PACKET		1500
 
 typedef struct {
@@ -28,12 +28,7 @@ typedef struct {
     char				*HostName;
 	struct in_addr		*HostAddr;
 	uint8_t				*pResp;
-	// RX messages former related
-	bool				is_msg_header_read;
-	uint32_t			body_size;
-	uint32_t			body_offset;
-	uint32_t			rx_msg_count;
-	uint8_t				client_msg_buf[MAX_SERVER_MSG_SIZE + 1];
+	struct tcp_former	former;
 } CLIENT_INFO;
 
 void* THRSimClient(void *arg);

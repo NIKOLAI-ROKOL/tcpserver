@@ -22,6 +22,7 @@ SERVER_INCS	=	-I ./server \
 
 SERVER_SRCS = \
 ./common/common_lib.c \
+./common/tcp_former.c \
 ./server/tcp_server.c \
 
 SERVER_OBJS	=  $(SERVER_SRCS:.c=.o)
@@ -35,6 +36,7 @@ CLIENT_INCS	=	-I ./client \
 
 CLIENT_SRCS = \
 ./common/common_lib.c \
+./common/tcp_former.c \
 ./client/tcp_client.c \
 
 CLIENT_OBJS	=  $(CLIENT_SRCS:.c=.o)

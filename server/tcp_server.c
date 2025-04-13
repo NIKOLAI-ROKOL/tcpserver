@@ -7,8 +7,11 @@ Revision history:
 
 #include "interface.h"
 #include "tcp_server.h"
- 
-static bool ClientChannelCreate(int Socket, struct sockaddr_in* pClientAddr);
+#include "tcp_former.h"
+
+static bool CreateServerFreeChannelsList(struct server_info* pserver);
+static bool ServerConfigRead(struct server_info* pserver, char const* file);
+static bool ClientChannelCreate(struct server_info* pserver, int Socket, struct sockaddr_in* pClientAddr);
 static void ClientChannelClose(struct channel_info* pChan);
 static bool HandleClientPacketFormer(struct channel_info* pChan, uint8_t* pBody, uint32_t len);
 static void HelpInfoPrint();
@@ -16,18 +19,9 @@ static void AddChannelList(struct channel_list *pChannelsList, struct channel_in
 static void RemChannelList(struct channel_list *pChannelsList, struct channel_info *pChannel);
 static struct channel_info* GetFistChannelList(struct channel_list *pChannelsList);
 static struct channel_info* GetNextChannelList(struct channel_list *pChannelsList);
+static bool handle_clients_message(void* data, uint8_t* p_req, uint32_t data_len);
 
 bool gExitRequest = false;
-unsigned int gTcpServerIpPort = SERVER_DEF_ACCESS_PORT;
-uint32_t gMaxClientReqInt = MAX_DEF_CLIENT_REQ_PER_INT;
-uint32_t gMaxSimultClients = MAX_DEF_SIMILT_CLIENTS;
-char gTcpServerAddr[512];
-uint8_t* pClientRespBuf = NULL;
-
-int epollfd = -1;
-struct epoll_event* gEvents = NULL;
-
-struct channel_list ClientChannelsList;
 
 struct channel_info serverChan;
 struct channel_info timerChan;
@@ -62,8 +56,6 @@ int main(int argc, char* argv[])
 	struct epoll_event	ev;
 	unsigned char		MsgBuffer[MAX_SERV_RX_PACKET + 1];
 
-	memset(&ClientChannelsList, 0, sizeof(struct channel_list));
-	
 	signal(SIGPIPE, SIG_IGN);
 	signal(SIGALRM, SIG_IGN);
 	signal(SIGIO, SIG_IGN);
@@ -78,8 +70,11 @@ int main(int argc, char* argv[])
 		timerChan.pserver = &server_info;
 		serverChan.pserver = &server_info;
 
-		int pos, c;
-		char cmdStr[MAX_SERVER_CONFIG_LINE_LEN + 1];
+		server_info.epollfd = -1;
+		server_info.TcpServerIpPort = SERVER_DEF_ACCESS_PORT;
+		server_info.MaxClientReqInt = MAX_DEF_CLIENT_REQ_PER_INT;
+		server_info.MaxSimultClients = MAX_DEF_SIMILT_CLIENTS;
+		strcpy(server_info.TcpServerAddr, SERVER_DEF_ACCESS_ADDR);
 
 		if (argc != 2) {
 			printf("Not all mandatory fields are set\n");
@@ -87,131 +82,38 @@ int main(int argc, char* argv[])
 			break;
 		}
 
-		FILE* pFh = fopen(argv[1], "r");
-		if (!pFh) {
-			printf("Failed to open txp_server configuration file (%s) for read\n", argv[1]);
-			config_ussue = true;			
-			break;
-		}
-
-		strcpy(gTcpServerAddr, SERVER_DEF_ACCESS_ADDR);
-		do { 
-			// read all lines in config file
-			pos = 0;
-			do { 
-				c = fgetc(pFh);
-				if((c != EOF) && (c != '\r') && (c != '\n') && (pos < MAX_SERVER_CONFIG_LINE_LEN)) {
-					cmdStr[pos++] = (char)c;
-				}
-			} while((c != EOF) && (c != '\n') && (c != '\r'));
-			if ((pos > 0) && (*cmdStr != '#')) {
-				cmdStr[pos] = 0;
-				for(;;) {
-					i = FindCmdBuf(cmdStr, server_ip_addr_tag);
-					if (i != CMD_NOT_FOUND) {
-						char const* pval = BeginValueMove(&cmdStr[i]);
-						if (!pval) {
-							config_ussue = true;
-							break;
-						}
-
-						strcpy(gTcpServerAddr, pval);
-						break;
-					}
-
-					i = FindCmdBuf(cmdStr, server_ip_port_tag);
-					if (i != CMD_NOT_FOUND) {
-						char const* pval = BeginValueMove(&cmdStr[i]);
-						if (!pval) {
-							config_ussue = true;
-							break;
-						}
-
-						gTcpServerIpPort = (unsigned int)atoi(pval);
-						if ((gTcpServerIpPort < 1) || (gTcpServerIpPort > 65535)) {
-							printf("IP port is OOR (%u)\n", gTcpServerIpPort);
-							config_ussue = true;
-							break;
-						}
-
-						break;
-					}
-
-					i = FindCmdBuf(cmdStr, max_simult_clients_tag);
-					if (i != CMD_NOT_FOUND) {
-						char const* pval = BeginValueMove(&cmdStr[i]);
-						if (!pval) {
-							config_ussue = true;
-							break;
-						}
-
-						gMaxSimultClients = (unsigned int)atoi(pval);
-						if ((gMaxSimultClients < 10) || (gMaxSimultClients > 100)) {
-							printf("Maximum number of simult. clients is OOR (%u)\n", gMaxSimultClients);
-							config_ussue = true;
-							break;
-						}
-
-						break;
-					}
-
-					i = FindCmdBuf(cmdStr, max_client_req_int_tag);
-					if (i != CMD_NOT_FOUND) {
-						char const* pval = BeginValueMove(&cmdStr[i]);
-						if (!pval) {
-							config_ussue = true;
-							break;
-						}
-
-						gMaxClientReqInt = (unsigned int)atoi(pval);
-						if ((gMaxClientReqInt < 1) || (gMaxClientReqInt > 10000)) {
-							printf("Maximum number of client's requests per interval is OOR (%u)\n", gMaxClientReqInt);
-							config_ussue = true;
-							break;
-						}
-
-						break;
-					}
-
-					printf("Unexpected command {%s}\n", cmdStr);
-					config_ussue = true;
-					break;
-				}
-
-				if (config_ussue) {
-					break;
-				}
-			}
-		} while(c != EOF);
-		fclose(pFh);
-
-		if (config_ussue) {
+		if (ServerConfigRead(&server_info, argv[1])) {
 			printf("Please correct server's configuration file\n");
-			break;
+			config_ussue = true;
+			break;			
 		}
 
 		printf("Server's configuration:\n%s\n", server_info_delimer);
-		printf("Server IP addr:                   %s\n", gTcpServerAddr);
-		printf("Server IP port:                   %u\n", gTcpServerIpPort);
-		printf("Max simultaneously clients:       %u\n", gMaxSimultClients);
-		printf("Max client's requests per second: %u\n", gMaxClientReqInt);
+		printf("Server IP addr:                   %s\n", server_info.TcpServerAddr);
+		printf("Server IP port:                   %u\n", server_info.TcpServerIpPort);
+		printf("Max simultaneously clients:       %u\n", server_info.MaxSimultClients);
+		printf("Max client's requests per second: %u\n", server_info.MaxClientReqInt);
 		printf("%s\n\n", server_info_delimer);
 
-		pClientRespBuf = (uint8_t*)malloc((MAX_CLIENT_MSG_SIZE + 3) * sizeof(uint8_t));
-		if (!pClientRespBuf) {
+		if (!CreateServerFreeChannelsList(&server_info)) {
+			break;
+		}
+		
+		server_info.pClientRespBuf = (uint8_t*)malloc((MAX_CLIENT_MSG_SIZE + 3) * sizeof(uint8_t));
+		if (!server_info.pClientRespBuf) {
 			printf("Fail to memory allocation for client's response\n");
 			break;
 		}
 
-		gEvents = (struct epoll_event*)malloc(MAX_RX_EVENTS*sizeof(struct epoll_event));
-		if (!gEvents) {
+		server_info.Events = (struct epoll_event*)malloc(MAX_RX_EVENTS*sizeof(struct epoll_event));
+		if (!server_info.Events) {
 			printf("Fail to memory allocation\n");
 			break;	
 		}
 		
-		memset((unsigned char*)gEvents, 0, MAX_RX_EVENTS*sizeof(struct epoll_event));
-		epollfd = epoll_create1(0);
-		if (epollfd == -1) {
+		memset((unsigned char*)server_info.Events, 0, MAX_RX_EVENTS*sizeof(struct epoll_event));
+		server_info.epollfd = epoll_create1(0);
+		if (server_info.epollfd == -1) {
 			printf("Fail to epoll create.\n");
 			break;
 		}
@@ -227,15 +129,15 @@ int main(int argc, char* argv[])
 		ev.events = EPOLLIN | EPOLLERR;
 		ev.data.ptr = &timerChan;
 
-		if (epoll_ctl(epollfd, EPOLL_CTL_ADD, timerChan.Socket, &ev) == -1) {
+		if (epoll_ctl(server_info.epollfd, EPOLL_CTL_ADD, timerChan.Socket, &ev) == -1) {
 			printf("Fail to add %d timer socket to epoll (error: %s)\n", timerChan.Socket, strerror(errno));
 			close(timerChan.Socket);
 			timerChan.Socket = -1;
 			break;
 		}
 			
-		if((he = gethostbyname(gTcpServerAddr)) == NULL) {
-			printf("Fail to gethostbyname() for %s address\n", gTcpServerAddr);
+		if((he = gethostbyname(server_info.TcpServerAddr)) == NULL) {
+			printf("Fail to gethostbyname() for %s address\n", server_info.TcpServerAddr);
 			break;
 		}
 
@@ -243,7 +145,7 @@ int main(int argc, char* argv[])
 			memcpy(&addr, he->h_addr_list[0], sizeof(struct in_addr));
 			LocalIP = inet_addr(inet_ntoa(addr));
 		} else {
-			printf("Fail to fiund local address for %s\n", gTcpServerAddr);
+			printf("Fail to fiund local address for %s\n", server_info.TcpServerAddr);
 			break;	
 		}
 
@@ -275,10 +177,10 @@ int main(int argc, char* argv[])
 		bzero((char*) &serveraddr, sizeof(serveraddr));
 		serveraddr.sin_family = AF_INET;
 		serveraddr.sin_addr.s_addr = LocalIP;
-		serveraddr.sin_port = htons(gTcpServerIpPort);
+		serveraddr.sin_port = htons(server_info.TcpServerIpPort);
 		
 		if (bind(serverChan.Socket, (struct sockaddr*)&serveraddr, sizeof(serveraddr)) < 0) {
-			printf("Failed to bind SERVER's socket (port: %u, error %u (%s))\n", gTcpServerIpPort, errno, strerror(errno));
+			printf("Failed to bind SERVER's socket (port: %u, error %u (%s))\n", server_info.TcpServerIpPort, errno, strerror(errno));
 			break;
 		}
 
@@ -291,7 +193,7 @@ int main(int argc, char* argv[])
 		ev.events = EPOLLIN | EPOLLERR;
 		ev.data.ptr = &serverChan;
 
-		if (epoll_ctl(epollfd, EPOLL_CTL_ADD, serverChan.Socket, &ev) == -1) {
+		if (epoll_ctl(server_info.epollfd, EPOLL_CTL_ADD, serverChan.Socket, &ev) == -1) {
 			printf("Ctx: %p, Fail to add %d socket to epoll (error: %s)\n",
 				&serverChan, serverChan.Socket, strerror(errno));
 			break;
@@ -311,7 +213,7 @@ int main(int argc, char* argv[])
 		printf("************ For stop processing please press Ctrl+C **************\n\n");
 
 		while(!gExitRequest) {			
-			int rc = epoll_wait(epollfd, gEvents, MAX_RX_EVENTS, timeout);
+			int rc = epoll_wait(server_info.epollfd, server_info.Events, MAX_RX_EVENTS, timeout);
 			if (rc < 0) {
 				if (!gExitRequest) {
 					printf("epoll_wait for %u msces completed, rc = %d - error %u (%s)\n", timeout, rc, errno, strerror(errno));
@@ -323,7 +225,7 @@ int main(int argc, char* argv[])
 			if (rc == 0) { continue; }
 
 			for (i = 0; i < rc; i++) {
-				struct epoll_event* sel_event = &gEvents[i];
+				struct epoll_event* sel_event = &server_info.Events[i];
 				pChan = (struct channel_info*)(sel_event->data.ptr);
 				if (!pChan) {
 					printf("Empty data ptr\n");
@@ -335,8 +237,8 @@ int main(int argc, char* argv[])
 					struct sockaddr_in ClientAddr;
 					int ClientSocket = accept(pChan->Socket, (struct sockaddr*)&ClientAddr, &LineLocal);
 					if (ClientSocket > 0) {
-						if ((uint32_t)ClientChannelsList.Count < gMaxSimultClients) {
-							if (ClientChannelCreate(ClientSocket, &ClientAddr)) {
+						if ((uint32_t)server_info.UsedClientChannelsList.Count < server_info.MaxSimultClients) {
+							if (ClientChannelCreate(&server_info, ClientSocket, &ClientAddr)) {
 								pChan->pserver->accept_connections++;
 								printf("Client's connection from %s:%u is established\n",
 									inet_ntoa(*(struct in_addr*)&ClientAddr.sin_addr.s_addr), ntohs(ClientAddr.sin_port));
@@ -354,10 +256,10 @@ int main(int argc, char* argv[])
 						break;
 					}
 
-					pSelChan = GetFistChannelList(&ClientChannelsList);
+					pSelChan = GetFistChannelList(&server_info.UsedClientChannelsList);
 					while(pSelChan) {
 						pSelChan->rx_msg_count = 0;
-						pSelChan = GetNextChannelList(&ClientChannelsList);
+						pSelChan = GetNextChannelList(&server_info.UsedClientChannelsList);
 					}
 				} else if (pChan->Type == CT_CLIENT) {
 					int rcv_bytes = recv(pChan->Socket, MsgBuffer, MAX_SERV_RX_PACKET, 0);
@@ -369,8 +271,8 @@ int main(int argc, char* argv[])
 						ClientChannelClose(pChan);
 						continue;
 					}
-					
-					if (!HandleClientPacketFormer(pChan, MsgBuffer, rcv_bytes)) {
+
+					if (!tcp_former_process_data(&pChan->former, MsgBuffer, rcv_bytes)) {
 						ClientChannelClose(pChan);
 						continue;					
 					}
@@ -381,10 +283,10 @@ int main(int argc, char* argv[])
 		}
 
 		printf("\nServer stop is initiated\n");
-		pSelChan = GetFistChannelList(&ClientChannelsList);
+		pSelChan = GetFistChannelList(&server_info.UsedClientChannelsList);
 		while(pSelChan) {
 			ClientChannelClose(pSelChan);
-			pSelChan = GetFistChannelList(&ClientChannelsList);
+			pSelChan = GetFistChannelList(&server_info.UsedClientChannelsList);
 		}
 
 		printf("\nSummary: (accept conn: %u, reset conn: %u, rx requests: %u, completed: %u, rejected: %u, error: %u)\n",
@@ -393,7 +295,7 @@ int main(int argc, char* argv[])
 		break;
 	}
 	
-	if (epollfd > 0) {
+	if (server_info.epollfd > 0) {
 		if (timerChan.Socket > 0) {
 			const struct timespec load_check_off = { 0, 0 };
 			its.it_value = load_check_off;
@@ -407,7 +309,7 @@ int main(int argc, char* argv[])
 			ev.events = EPOLLIN | EPOLLERR;
 			ev.data.ptr = &timerChan;
 
-			if (epoll_ctl(epollfd, EPOLL_CTL_DEL, timerChan.Socket, &ev) == -1) {
+			if (epoll_ctl(server_info.epollfd, EPOLL_CTL_DEL, timerChan.Socket, &ev) == -1) {
 				printf("Fail to remove %d timer socket from epoll (error: %s)\n", timerChan.Socket, strerror(errno));
 			}
 
@@ -419,18 +321,25 @@ int main(int argc, char* argv[])
 			ev.events = EPOLLIN | EPOLLERR;
 			ev.data.ptr = &serverChan;
 
-			if (epoll_ctl(epollfd, EPOLL_CTL_DEL, serverChan.Socket, &ev) == -1) {
+			if (epoll_ctl(server_info.epollfd, EPOLL_CTL_DEL, serverChan.Socket, &ev) == -1) {
 				printf("Fail to remove %d server socket from epoll (error: %s)\n", serverChan.Socket, strerror(errno));
 			}
 
 			close(serverChan.Socket);
 		}
 
-		close(epollfd);
+		close(server_info.epollfd);
 	}
 
-	if (pClientRespBuf) { free(pClientRespBuf); }
-	if (gEvents) { free(gEvents); }
+	pSelChan = GetFistChannelList(&server_info.FreeClientChannelsList);
+	while(pSelChan) {
+		RemChannelList(&server_info.FreeClientChannelsList, pSelChan);
+		free(pSelChan);
+		pSelChan = GetFistChannelList(&server_info.FreeClientChannelsList);
+	}
+		
+	if (server_info.pClientRespBuf) { free(server_info.pClientRespBuf); }
+	if (server_info.Events) { free(server_info.Events); }
 
 	if (config_ussue) {
 		HelpInfoPrint();
@@ -439,6 +348,26 @@ int main(int argc, char* argv[])
 		printf("Server stop is completed\n");
 		exit(0);
 	}
+}
+
+static bool CreateServerFreeChannelsList(struct server_info* pserver)
+{
+	int i;
+	bool status = true;
+
+	for (i=0;i < pserver->MaxSimultClients;i++) {
+		struct channel_info* pChan = (struct channel_info*)malloc(sizeof(struct channel_info));
+		if (!pChan) {
+			printf("Failed to memory allocation for channel\n");
+			status = false;
+			break;
+		}
+
+		memset((uint8_t*)pChan, 0, sizeof(struct channel_info));
+		AddChannelList(&pserver->FreeClientChannelsList, pChan);
+	}
+	
+	return status;
 }
 
 static void ClientChannelClose(struct channel_info* pChan)
@@ -454,18 +383,17 @@ static void ClientChannelClose(struct channel_info* pChan)
 	ev.events = EPOLLIN | EPOLLERR;
 	ev.data.ptr = pChan;
 
-	if (epoll_ctl(epollfd, EPOLL_CTL_DEL, pChan->Socket, &ev) == -1) {
+	if (epoll_ctl(pChan->pserver->epollfd, EPOLL_CTL_DEL, pChan->Socket, &ev) == -1) {
 		printf("Ctx: %p, Fail to delete client's %d socket from epoll (error: %s)\n",
 			pChan, pChan->Socket, strerror(errno));
 	}
 	
 	close(pChan->Socket);
-	pChan->Socket = -1;
-	RemChannelList(&ClientChannelsList, pChan);
-	free(pChan);
+	RemChannelList(&pChan->pserver->UsedClientChannelsList, pChan);
+	AddChannelList(&pChan->pserver->FreeClientChannelsList, pChan);
 }
 
-static bool ClientChannelCreate(int Socket, struct sockaddr_in* pClientAddr) 
+static bool ClientChannelCreate(struct server_info* pserver, int Socket, struct sockaddr_in* pClientAddr) 
 {
 	bool status = false;
 	int flags;
@@ -476,17 +404,24 @@ static bool ClientChannelCreate(int Socket, struct sockaddr_in* pClientAddr)
 	
 	for(;;)
 	{
-		pChan = (struct channel_info*)malloc(sizeof(struct channel_info));
-		if (!pChan) {
-			printf("Failed to memory allocation for channel\n");
-			break;			
+		pChan = GetFistChannelList(&pserver->FreeClientChannelsList);
+		if (pChan) {
+			RemChannelList(&pserver->FreeClientChannelsList, pChan);
+		} else {
+			pChan = (struct channel_info*)malloc(sizeof(struct channel_info));
+			if (!pChan) {
+				printf("Failed to memory allocation for channel\n");
+				break;
+			}
 		}
 
 		memset((uint8_t*)pChan, 0, sizeof(struct channel_info));
-		pChan->pserver = &server_info;
+		pChan->pserver = pserver;
 		pChan->Type = CT_CLIENT;
 		pChan->Socket = Socket;
 		pChan->ClientAddr = *pClientAddr;
+		
+		tcp_former_init(&pChan->former, pChan, handle_clients_message);
 		if (updateSocketSize(pChan->Socket, SO_SNDBUF, MAX_SERV_RX_PACKET*8) != 0) {
 			printf("Failed to update lient's socket TX buf size (errno %d)\n", errno);
 			break;
@@ -519,14 +454,14 @@ static bool ClientChannelCreate(int Socket, struct sockaddr_in* pClientAddr)
 		ev.events = EPOLLIN | EPOLLERR;
 		ev.data.ptr = pChan;
 
-		if (epoll_ctl(epollfd, EPOLL_CTL_ADD, pChan->Socket, &ev) == -1)
+		if (epoll_ctl(pserver->epollfd, EPOLL_CTL_ADD, pChan->Socket, &ev) == -1)
 		{
 			printf("Ctx: %p, Fail to add client's %d socket to epoll (error: %s)\n",
 				pChan, pChan->Socket, strerror(errno));
 			break;
 		}
 		
-		AddChannelList(&ClientChannelsList, pChan);
+		AddChannelList(&pserver->UsedClientChannelsList, pChan);
 		status = true;
 		break;
 	}
@@ -536,7 +471,7 @@ static bool ClientChannelCreate(int Socket, struct sockaddr_in* pClientAddr)
 			close(pChan->Socket);			
 		}
 
-		free(pChan);
+		AddChannelList(&pserver->FreeClientChannelsList, pChan);
 	}
 	
 	return status;
@@ -551,23 +486,129 @@ static void HelpInfoPrint()
 	printf("Server's configuratino file structure\nAll parameters are optional.\n");
 	printf("%s: <Address>    - Server's IP address or FQDN (default: %s)\n", server_ip_addr_tag, SERVER_DEF_ACCESS_ADDR);
 	printf("%s: <1...65535>     - Server's IP port (default: %u)\n", server_ip_port_tag, SERVER_DEF_ACCESS_PORT);
-	printf("%s: <1...100>      - Maximum number of simultaneously processed clients (Default: %u)\n", max_simult_clients_tag, MAX_DEF_SIMILT_CLIENTS);
+	printf("%s: <10...%u>     - Maximum number of simultaneously processed clients (Default: %u)\n", max_simult_clients_tag, MAX_SIMILT_CLIENTS, MAX_DEF_SIMILT_CLIENTS);
 	printf("%s: <1...10000> - Maximum number of processed client's requests per second (Default: %u)\n", max_client_req_int_tag, MAX_DEF_CLIENT_REQ_PER_INT);
 }
 
-static bool handle_clients_message(struct channel_info* pChan)
+bool ServerConfigRead(struct server_info* pserver, char const* file)
+{
+	char c;
+	int i, pos;
+	bool config_ussue = false;
+	char cmdStr[MAX_SERVER_CONFIG_LINE_LEN + 1];
+
+	FILE* pFh = fopen(file, "r");
+	if (!pFh) {
+		printf("Failed to open txp_server configuration file (%s) for read\n", file);
+		return config_ussue;
+	}
+
+	do { 
+		// read all lines in config file
+		pos = 0;
+		do { 
+			c = fgetc(pFh);
+			if((c != EOF) && (c != '\r') && (c != '\n') && (pos < MAX_SERVER_CONFIG_LINE_LEN)) {
+				cmdStr[pos++] = (char)c;
+			}
+		} while((c != EOF) && (c != '\n') && (c != '\r'));
+		if ((pos > 0) && (*cmdStr != '#')) {
+			cmdStr[pos] = 0;
+			for(;;) {
+				i = FindCmdBuf(cmdStr, server_ip_addr_tag);
+				if (i != CMD_NOT_FOUND) {
+					char const* pval = BeginValueMove(&cmdStr[i]);
+					if (!pval) {
+						config_ussue = true;
+						break;
+					}
+
+					strcpy(pserver->TcpServerAddr, pval);
+					break;
+				}
+
+				i = FindCmdBuf(cmdStr, server_ip_port_tag);
+				if (i != CMD_NOT_FOUND) {
+					char const* pval = BeginValueMove(&cmdStr[i]);
+					if (!pval) {
+						config_ussue = true;
+						break;
+					}
+
+					pserver->TcpServerIpPort = (unsigned int)atoi(pval);
+					if ((pserver->TcpServerIpPort < 1) || (pserver->TcpServerIpPort > 65535)) {
+						printf("IP port is OOR (%u)\n", pserver->TcpServerIpPort);
+						config_ussue = true;
+						break;
+					}
+
+					break;
+				}
+
+				i = FindCmdBuf(cmdStr, max_simult_clients_tag);
+				if (i != CMD_NOT_FOUND) {
+					char const* pval = BeginValueMove(&cmdStr[i]);
+					if (!pval) {
+						config_ussue = true;
+						break;
+					}
+
+					pserver->MaxSimultClients = (unsigned int)atoi(pval);
+					if ((pserver->MaxSimultClients < 10) || (pserver->MaxSimultClients > MAX_SIMILT_CLIENTS)) {
+						printf("Maximum number of simult. clients is OOR (%u)\n", pserver->MaxSimultClients);
+						config_ussue = true;
+						break;
+					}
+
+					break;
+				}
+
+				i = FindCmdBuf(cmdStr, max_client_req_int_tag);
+				if (i != CMD_NOT_FOUND) {
+					char const* pval = BeginValueMove(&cmdStr[i]);
+					if (!pval) {
+						config_ussue = true;
+						break;
+					}
+
+					pserver->MaxClientReqInt = (unsigned int)atoi(pval);
+					if ((pserver->MaxClientReqInt < 1) || (pserver->MaxClientReqInt > 10000)) {
+						printf("Maximum number of client's requests per interval is OOR (%u)\n", pserver->MaxClientReqInt);
+						config_ussue = true;
+						break;
+					}
+
+					break;
+				}
+
+				printf("Unexpected command {%s}\n", cmdStr);
+				config_ussue = true;
+				break;
+			}
+
+			if (config_ussue) {
+				break;
+			}
+		}
+	} while(c != EOF);
+	fclose(pFh);
+	
+	return config_ussue;
+}
+
+static bool handle_clients_message(void* data, uint8_t* p_req, uint32_t data_len)
 {
 	int rc;
 	bool status = true;
-	
-	uint32_t data_len = pChan->body_size;
-	uint8_t* p_req = pChan->client_msg_buf;
-	uint8_t* p_resp_msg = pClientRespBuf + 2;
+
+	struct channel_info* pChan = (struct channel_info*)data;
+	uint8_t* p_resp_buf = pChan->pserver->pClientRespBuf;
+	uint8_t* p_resp_msg = p_resp_buf + 2;
 	uint8_t* p_body_start = p_resp_msg;
 	uint8_t msg_tag = *p_req++;
 	data_len--;	
 	pChan->pserver->received_requests++;
-	if (pChan->rx_msg_count < gMaxClientReqInt) {
+	if (pChan->rx_msg_count < pChan->pserver->MaxClientReqInt) {
 		pChan->rx_msg_count++;	
 		if (msg_tag == CLIENT_API_MSG_REQ) {
 			pChan->pserver->completed_requests++;
@@ -583,47 +624,12 @@ static bool handle_clients_message(struct channel_info* pChan)
 		*p_resp_msg++ = CLIENT_API_MSG_REJ;
 	}
 
-	Uint16Pack(pClientRespBuf, (uint32_t)(p_resp_msg - p_body_start));	
-    if ((rc = send(pChan->Socket, pClientRespBuf, (uint32_t)(p_resp_msg - pClientRespBuf), 0)) == -1) {
+	Uint16Pack(p_resp_buf, (uint32_t)(p_resp_msg - p_body_start));	
+    if ((rc = send(pChan->Socket, p_resp_buf, (uint32_t)(p_resp_msg - p_resp_buf), 0)) == -1) {
         printf("Response body send() is failed (error:  %d)\n", errno);
 		status = false;
 	}
 
-	return status;
-}
-
-static bool HandleClientPacketFormer(struct channel_info* pChan, uint8_t* pBody, uint32_t len)
-{
-	bool status = true;
-	do {
-		if (!pChan->is_msg_header_read) {
-			if (len < 2) {
-				status = false;
-				break;
-			}
-
-			pBody = Uint16Unpack(pBody, &pChan->body_size);
-			pChan->is_msg_header_read = true;
-			len -= 2;
-		}
-
-		uint32_t ds = pChan->body_size - pChan->body_offset;
-		if (len < ds) {
-			memcpy(&pChan->client_msg_buf[pChan->body_offset], pBody,  len);
-			pChan->body_offset += len;
-			break;
-		}
-
-		memcpy(&pChan->client_msg_buf[pChan->body_offset], pBody,  ds);
-		if (!handle_clients_message(pChan)) {
-			status = false;
-			break;
-		}
-
-		len -= ds;
-		pChan->body_offset = 0;
-		pChan->is_msg_header_read = false;
-	} while (len > 0);
 	return status;
 }
 
